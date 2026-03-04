@@ -383,7 +383,7 @@ def plot_metric_fields(
     fields = [eps, phi, gam, det]
     titles = [r'$\varepsilon$ (a₁₁)', r'$\varphi$ (a₁₂)',
               r'$\gamma$ (a₂₂)', r'det(a)']
-    cmaps = ['RdBu_r', 'PiYG', 'RdBu_r', 'YlOrRd']
+    cmaps = ['PiYG', 'PiYG', 'PiYG', 'PiYG']
 
     for ax, field, title, cmap in zip(axes, fields, titles, cmaps):
         vabs = max(abs(np.nanmin(field)), abs(np.nanmax(field)))
