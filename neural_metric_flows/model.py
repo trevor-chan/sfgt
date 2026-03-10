@@ -39,10 +39,16 @@ def enforce_metric_positivity(E_raw, F_raw, G_raw, margin=0.01):
     """
     Enforce E > 0, G > 0, EG - F² > 0.
 
-    E, G through softplus. F constrained via tanh * sqrt(EG) * (1 - margin).
+    E, G through shifted softplus calibrated so that f(1) = 1.
+    This preserves the identity metric at boundary conditions.
+    F constrained via tanh * sqrt(EG) * (1 - margin).
     """
-    E = torch.nn.functional.softplus(E_raw)
-    G = torch.nn.functional.softplus(G_raw)
+    # Shifted softplus: softplus(x - offset) where offset ≈ 0.459
+    # makes softplus(1 - 0.459) = softplus(0.541) ≈ 1.0
+    # This ensures the identity metric (E=1, G=1) passes through unchanged.
+    offset = 0.4586751453870819  # log(e - 1)
+    E = torch.nn.functional.softplus(E_raw - offset)
+    G = torch.nn.functional.softplus(G_raw - offset)
     max_F = torch.sqrt(E * G) * (1.0 - margin)
     F = torch.tanh(F_raw) * max_F
     return E, F, G
@@ -127,6 +133,8 @@ class FundamentalFormNet(nn.Module):
         raw = self.net(tuv)  # (N, n_out_raw)
 
         if self.endpoint_a_o is not None and self.endpoint_a_f is not None:
+            # Hard BC mode: baseline is already a valid metric (convex combo of valid metrics)
+            # Skip positivity enforcement to preserve exact boundary values
             a_o = self.endpoint_a_o(uv)
             a_f = self.endpoint_a_f(uv)
 
@@ -140,24 +148,24 @@ class FundamentalFormNet(nn.Module):
             )
 
             if self.mode == '2d':
-                E_raw = baseline[0] + blend * raw[:, 0]
-                F_raw = baseline[1] + blend * raw[:, 1]
-                G_raw = baseline[2] + blend * raw[:, 2]
+                E = baseline[0] + blend * raw[:, 0]
+                F = baseline[1] + blend * raw[:, 1]
+                G = baseline[2] + blend * raw[:, 2]
             else:
-                E_raw = baseline[0] + blend * raw[:, 0]
-                F_raw = baseline[1] + blend * raw[:, 1]
-                G_raw = baseline[2] + blend * raw[:, 2]
+                E = baseline[0] + blend * raw[:, 0]
+                F = baseline[1] + blend * raw[:, 1]
+                G = baseline[2] + blend * raw[:, 2]
                 L_out = baseline[3] + blend * raw[:, 3]
                 M_out = baseline[4] + blend * raw[:, 4]
                 N_out = baseline[5] + blend * raw[:, 5]
         else:
+            # No hard BCs: apply positivity enforcement
             if self.mode == '2d':
                 E_raw, F_raw, G_raw = raw[:, 0], raw[:, 1], raw[:, 2]
             else:
                 E_raw, F_raw, G_raw = raw[:, 0], raw[:, 1], raw[:, 2]
                 L_out, M_out, N_out = raw[:, 3], raw[:, 4], raw[:, 5]
-
-        E, F, G = enforce_metric_positivity(E_raw, F_raw, G_raw)
+            E, F, G = enforce_metric_positivity(E_raw, F_raw, G_raw)
 
         if self.mode == '2d':
             return E, F, G

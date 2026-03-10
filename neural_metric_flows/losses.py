@@ -24,27 +24,28 @@ from geometry import (
 # 1. Compatibility losses
 # =============================================================================
 
-def flatness_loss(E, F, G, uv):
+def flatness_loss(E, F, G, coords, u_idx=0, v_idx=1):
     """2D: penalize K_Brioschi != 0."""
-    K = gaussian_curvature_brioschi(E, F, G, uv)
+    K = gaussian_curvature_brioschi(E, F, G, coords, u_idx=u_idx, v_idx=v_idx)
     return torch.mean(K ** 2)
 
 
-def gauss_equation_loss(E, F, G, L, M, N, uv):
+def gauss_equation_loss(E, F, G, L, M, N, coords, u_idx=0, v_idx=1):
     """3D: K_extrinsic must equal K_intrinsic."""
-    R = gauss_residual_3d(E, F, G, L, M, N, uv)
+    R = gauss_residual_3d(E, F, G, L, M, N, coords, u_idx=u_idx, v_idx=v_idx)
     return torch.mean(R ** 2)
 
 
-def codazzi_loss(E, F, G, L, M, N, uv):
+def codazzi_loss(E, F, G, L, M, N, coords, u_idx=0, v_idx=1):
     """3D: Codazzi-Mainardi compatibility."""
-    R1, R2 = codazzi_residuals(E, F, G, L, M, N, uv)
+    R1, R2 = codazzi_residuals(E, F, G, L, M, N, coords, u_idx=u_idx, v_idx=v_idx)
     return torch.mean(R1 ** 2 + R2 ** 2)
 
 
-def compatibility_loss_3d(E, F, G, L, M, N, uv):
+def compatibility_loss_3d(E, F, G, L, M, N, coords, u_idx=0, v_idx=1):
     """Combined Gauss + Codazzi for 3D."""
-    return gauss_equation_loss(E, F, G, L, M, N, uv) + codazzi_loss(E, F, G, L, M, N, uv)
+    return (gauss_equation_loss(E, F, G, L, M, N, coords, u_idx=u_idx, v_idx=v_idx) + 
+            codazzi_loss(E, F, G, L, M, N, coords, u_idx=u_idx, v_idx=v_idx))
 
 
 # =============================================================================

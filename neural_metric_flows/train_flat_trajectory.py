@@ -81,7 +81,7 @@ def train(
     w_flat=1.0,
     w_elastic=0.0,
     w_strain_rate=0.0,
-    margin=0.15,
+    margin=0.0,
     log_every=500,
     device='cpu',
 ):
@@ -117,14 +117,15 @@ def train(
         optimizer.zero_grad()
 
         tuv = sample_collocation(n_collocation, lo=lo, hi=hi, device=device)
-        uv = tuv[:, 1:3]
 
         E, F, G = model(tuv)
 
-        L_flat = flatness_loss(E, F, G, uv)
+        # For tuv coordinates, u is at index 1 and v is at index 2
+        L_flat = flatness_loss(E, F, G, tuv, u_idx=1, v_idx=2)
 
         L_elastic = torch.tensor(0.0, device=device)
         if w_elastic > 0:
+            uv = tuv[:, 1:3]  # Extract uv for reference metric
             E0, F0, G0 = metric_square(uv)
             L_elastic = elastic_energy_loss(E, F, G, E0, F0, G0)
 
@@ -134,6 +135,11 @@ def train(
 
         loss = w_flat * L_flat + w_elastic * L_elastic + w_strain_rate * L_strain_rate
 
+        # Compute curvature stats before backward (needs grad graph)
+        K = gaussian_curvature_brioschi(E, F, G, tuv, u_idx=1, v_idx=2)
+        K_max = torch.max(torch.abs(K)).detach().item()
+        K_mean = torch.mean(torch.abs(K)).detach().item()
+
         loss.backward()
 
         # Gradient clipping for stability
@@ -141,11 +147,6 @@ def train(
 
         optimizer.step()
         scheduler.step()
-
-        with torch.no_grad():
-            K = gaussian_curvature_brioschi(E, F, G, uv)
-            K_max = torch.max(torch.abs(K)).item()
-            K_mean = torch.mean(torch.abs(K)).item()
 
         history['loss_total'].append(loss.item())
         history['loss_flat'].append(L_flat.item())
@@ -169,7 +170,7 @@ def train(
 # Evaluation
 # =============================================================================
 
-def evaluate(model, n_t=11, K_grid=25, margin=0.15, device='cpu'):
+def evaluate(model, n_t=11, K_grid=25, margin=0.0, device='cpu'):
     """Evaluate trained model on a regular grid."""
     lo = -1.0 + margin
     hi = 1.0 - margin
@@ -188,8 +189,8 @@ def evaluate(model, n_t=11, K_grid=25, margin=0.15, device='cpu'):
 
         E, F, G = model(tuv)
 
-        # Curvature needs grad context
-        K = gaussian_curvature_brioschi(E, F, G, tuv[:, 1:3])
+        # Curvature needs grad context; use tuv with spatial indices
+        K = gaussian_curvature_brioschi(E, F, G, tuv, u_idx=1, v_idx=2)
 
         det_a = (E * G - F * F).detach()
 
@@ -323,13 +324,13 @@ if __name__ == '__main__':
         w_flat=1.0,
         w_elastic=0.0,
         w_strain_rate=0.01,
-        margin=0.15,
+        margin=0.0,
         log_every=500,
         device=device,
     )
 
     print("\nEvaluating on grid...")
-    results = evaluate(model, n_t=11, K_grid=25, margin=0.15, device=device)
+    results = evaluate(model, n_t=11, K_grid=25, margin=0.0, device=device)
 
     for r in results:
         print(f"  t={r['t']:.2f}: |K|_max={np.max(np.abs(r['K'])):.4e}  "

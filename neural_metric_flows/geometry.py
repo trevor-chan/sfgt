@@ -43,14 +43,14 @@ def partial(y, x, idx, create_graph=True):
     return g[:, idx]
 
 
-def partial_u(y, uv, create_graph=True):
-    """dy/du where uv[:, 0] = u."""
-    return partial(y, uv, 0, create_graph)
+def partial_u(y, coords, create_graph=True, u_idx=0):
+    """dy/du where coords[:, u_idx] = u."""
+    return partial(y, coords, u_idx, create_graph)
 
 
-def partial_v(y, uv, create_graph=True):
-    """dy/dv where uv[:, 1] = v."""
-    return partial(y, uv, 1, create_graph)
+def partial_v(y, coords, create_graph=True, v_idx=1):
+    """dy/dv where coords[:, v_idx] = v."""
+    return partial(y, coords, v_idx, create_graph)
 
 
 def partial_t(y, tuv, create_graph=True):
@@ -62,25 +62,27 @@ def partial_t(y, tuv, create_graph=True):
 # Christoffel symbols from first fundamental form
 # =============================================================================
 
-def christoffel_symbols(E, F, G, uv):
+def christoffel_symbols(E, F, G, coords, u_idx=0, v_idx=1):
     """
     Christoffel symbols of the second kind from (E, F, G).
 
     Parameters
     ----------
     E, F, G : Tensor (N,)
-    uv : Tensor (N, 2) with requires_grad=True
+    coords : Tensor (N, d) with requires_grad=True
+    u_idx, v_idx : int
+        Indices of u and v in the coords tensor.
 
     Returns
     -------
     dict with keys 'G111', 'G112', 'G122', 'G211', 'G212', 'G222'
     """
-    E_u = partial_u(E, uv)
-    E_v = partial_v(E, uv)
-    F_u = partial_u(F, uv)
-    F_v = partial_v(F, uv)
-    G_u = partial_u(G, uv)
-    G_v = partial_v(G, uv)
+    E_u = partial_u(E, coords, u_idx=u_idx)
+    E_v = partial_v(E, coords, v_idx=v_idx)
+    F_u = partial_u(F, coords, u_idx=u_idx)
+    F_v = partial_v(F, coords, v_idx=v_idx)
+    G_u = partial_u(G, coords, u_idx=u_idx)
+    G_v = partial_v(G, coords, v_idx=v_idx)
 
     det = E * G - F * F
     inv_det = 1.0 / (det + 1e-12)
@@ -103,7 +105,7 @@ def christoffel_symbols(E, F, G, uv):
 # Gaussian curvature via Brioschi formula
 # =============================================================================
 
-def gaussian_curvature_brioschi(E, F, G, uv):
+def gaussian_curvature_brioschi(E, F, G, coords, u_idx=0, v_idx=1):
     """
     Gaussian curvature K from first fundamental form only (Theorema Egregium).
 
@@ -112,22 +114,25 @@ def gaussian_curvature_brioschi(E, F, G, uv):
     Parameters
     ----------
     E, F, G : Tensor (N,)
-    uv : Tensor (N, 2)
+    coords : Tensor (N, d) where d >= 2
+        Coordinate tensor (can be uv or tuv).
+    u_idx, v_idx : int
+        Indices of u and v in the coords tensor.
 
     Returns
     -------
     K : Tensor (N,)
     """
-    E_u = partial_u(E, uv)
-    E_v = partial_v(E, uv)
-    F_u = partial_u(F, uv)
-    F_v = partial_v(F, uv)
-    G_u = partial_u(G, uv)
-    G_v = partial_v(G, uv)
+    E_u = partial_u(E, coords, u_idx=u_idx)
+    E_v = partial_v(E, coords, v_idx=v_idx)
+    F_u = partial_u(F, coords, u_idx=u_idx)
+    F_v = partial_v(F, coords, v_idx=v_idx)
+    G_u = partial_u(G, coords, u_idx=u_idx)
+    G_v = partial_v(G, coords, v_idx=v_idx)
 
-    E_vv = partial_v(E_v, uv)
-    G_uu = partial_u(G_u, uv)
-    F_uv = partial_v(F_u, uv)
+    E_vv = partial_v(E_v, coords, v_idx=v_idx)
+    G_uu = partial_u(G_u, coords, u_idx=u_idx)
+    F_uv = partial_v(F_u, coords, v_idx=v_idx)
 
     det_a = E * G - F * F
 
@@ -161,7 +166,7 @@ def gaussian_curvature_brioschi(E, F, G, uv):
 # Gauss equation residual (3D: extrinsic = intrinsic)
 # =============================================================================
 
-def gauss_residual_3d(E, F, G, L, M, N, uv):
+def gauss_residual_3d(E, F, G, L, M, N, coords, u_idx=0, v_idx=1):
     """
     Gauss equation: K_extrinsic - K_intrinsic = 0.
 
@@ -171,7 +176,7 @@ def gauss_residual_3d(E, F, G, L, M, N, uv):
     """
     det_a = E * G - F * F
     K_ext = (L * N - M * M) / (det_a + 1e-12)
-    K_int = gaussian_curvature_brioschi(E, F, G, uv)
+    K_int = gaussian_curvature_brioschi(E, F, G, coords, u_idx=u_idx, v_idx=v_idx)
     return K_ext - K_int
 
 
@@ -179,7 +184,7 @@ def gauss_residual_3d(E, F, G, L, M, N, uv):
 # Codazzi-Mainardi residuals (3D)
 # =============================================================================
 
-def codazzi_residuals(E, F, G, L, M, N, uv):
+def codazzi_residuals(E, F, G, L, M, N, coords, u_idx=0, v_idx=1):
     """
     Codazzi-Mainardi equations.
 
@@ -187,12 +192,12 @@ def codazzi_residuals(E, F, G, L, M, N, uv):
     -------
     R1, R2 : Tensor (N,)
     """
-    Gamma = christoffel_symbols(E, F, G, uv)
+    Gamma = christoffel_symbols(E, F, G, coords, u_idx=u_idx, v_idx=v_idx)
 
-    L_v = partial_v(L, uv)
-    M_u = partial_u(M, uv)
-    M_v = partial_v(M, uv)
-    N_u = partial_u(N, uv)
+    L_v = partial_v(L, coords, v_idx=v_idx)
+    M_u = partial_u(M, coords, u_idx=u_idx)
+    M_v = partial_v(M, coords, v_idx=v_idx)
+    N_u = partial_u(N, coords, u_idx=u_idx)
 
     lhs1 = L_v - M_u
     rhs1 = (L * Gamma['G112']
