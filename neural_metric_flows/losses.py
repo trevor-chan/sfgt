@@ -9,12 +9,10 @@ Categories:
 """
 
 import torch
-from geometry import (
+from .geometry import (
     gaussian_curvature_brioschi,
     gauss_residual_3d,
     codazzi_residuals,
-    gaussian_curvature,
-    mean_curvature,
     green_strain_invariants,
     partial_t,
 )
