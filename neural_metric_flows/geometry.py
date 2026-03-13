@@ -58,6 +58,74 @@ def partial_t(y, tuv, create_graph=True):
     return partial(y, tuv, 0, create_graph)
 
 
+def compute_fundamental_forms_from_embedding(
+    coords: torch.Tensor,
+    embedding_fn,
+    detach: bool = True,
+):
+    """
+    Compute fundamental forms from an analytic embedding r(u, v) via autograd.
+
+    Parameters
+    ----------
+    coords : Tensor (N, 2)
+        Surface coordinates.
+    embedding_fn : callable
+        Maps coords -> xyz with shape (N, 3).
+    detach : bool
+        If True, detach outputs before returning.
+
+    Returns
+    -------
+    (E, F, G, L, M, N) : tuple of Tensor (N,)
+        First and second fundamental form components.
+    """
+    with torch.enable_grad():
+        coords = coords.clone().requires_grad_(True)
+        xyz = embedding_fn(coords)
+
+        du_components = []
+        dv_components = []
+
+        for i in range(3):
+            grad_xyz = grad_scalar(xyz[:, i], coords, create_graph=True)
+            du_components.append(grad_xyz[:, 0])
+            dv_components.append(grad_xyz[:, 1])
+
+        r_u = torch.stack(du_components, dim=-1)
+        r_v = torch.stack(dv_components, dim=-1)
+
+        E = (r_u * r_u).sum(dim=-1)
+        F = (r_u * r_v).sum(dim=-1)
+        G = (r_v * r_v).sum(dim=-1)
+
+        normal = torch.cross(r_u, r_v, dim=-1)
+        normal = normal / torch.norm(normal, dim=-1, keepdim=True).clamp(min=1e-10)
+
+        r_uu_terms = []
+        r_uv_terms = []
+        r_vv_terms = []
+
+        for i in range(3):
+            grad_ru = grad_scalar(r_u[:, i], coords, create_graph=True)
+            grad_rv = grad_scalar(r_v[:, i], coords, create_graph=True)
+            r_uu_terms.append(grad_ru[:, 0])
+            r_uv_terms.append(grad_ru[:, 1])
+            r_vv_terms.append(grad_rv[:, 1])
+
+        r_uu = torch.stack(r_uu_terms, dim=-1)
+        r_uv = torch.stack(r_uv_terms, dim=-1)
+        r_vv = torch.stack(r_vv_terms, dim=-1)
+
+        L = (r_uu * normal).sum(dim=-1)
+        M = (r_uv * normal).sum(dim=-1)
+        N = (r_vv * normal).sum(dim=-1)
+
+    if detach:
+        return E.detach(), F.detach(), G.detach(), L.detach(), M.detach(), N.detach()
+    return E, F, G, L, M, N
+
+
 # =============================================================================
 # Christoffel symbols from first fundamental form
 # =============================================================================

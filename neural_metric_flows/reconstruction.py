@@ -147,16 +147,16 @@ def reconstruct_surface(
     X, Y, Z : ndarray (K, K)
         Surface coordinates in 3D (centered at origin).
     """
-    K = E.shape[0]
+    K_u, K_v = E.shape
 
     # Christoffel symbols
     Gamma = compute_christoffel_symbols(E, F, G, du, dv)
 
     # Initialize frame at (0, 0)
     # Position r, tangent vectors r_u, r_v (each 3D vectors at each grid point)
-    r = np.zeros((K, K, 3))      # position
-    r_u = np.zeros((K, K, 3))    # ∂r/∂u
-    r_v = np.zeros((K, K, 3))    # ∂r/∂v
+    r = np.zeros((K_u, K_v, 3))      # position
+    r_u = np.zeros((K_u, K_v, 3))    # ∂r/∂u
+    r_v = np.zeros((K_u, K_v, 3))    # ∂r/∂v
 
     # Initial frame via Cholesky-like decomposition
     # r_u · r_u = E, r_u · r_v = F, r_v · r_v = G
@@ -197,7 +197,7 @@ def reconstruct_surface(
         return {k: v[i, j] for k, v in Gamma.items()}
 
     # Propagate along left edge (i=0, varying j in v-direction)
-    for j in range(1, K):
+    for j in range(1, K_v):
         # Previous state
         r_prev = r[0, j-1]
         ru_prev = r_u[0, j-1]
@@ -225,8 +225,8 @@ def reconstruct_surface(
         r[0, j] = r_prev + 0.5 * dv * (rv_prev + r_v[0, j])
 
     # Propagate across each row (varying i in u-direction)
-    for j in range(K):
-        for i in range(1, K):
+    for j in range(K_v):
+        for i in range(1, K_u):
             # Previous state
             r_prev = r[i-1, j]
             ru_prev = r_u[i-1, j]
@@ -293,10 +293,40 @@ def reconstruct_flat_surface(
     X, Y : ndarray (K, K)
         Surface coordinates in 2D (Z ≈ 0).
     """
-    K = E.shape[0]
-    zeros = np.zeros((K, K))
+    K_u, K_v = E.shape
+    zeros = np.zeros((K_u, K_v))
     X, Y, Z = reconstruct_surface(E, F, G, zeros, zeros, zeros, du, dv)
     return X, Y
+
+
+def enforce_periodic_closure(
+    X: np.ndarray,
+    Y: np.ndarray,
+    Z: np.ndarray,
+    periodic_u: bool = False,
+    periodic_v: bool = False,
+) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """
+    Distribute seam drift across a reconstructed surface to close periodic loops.
+
+    This is a visualization-time correction for cylindrical/toroidal charts.
+    The underlying metric may already be periodic, but open-boundary frame
+    integration accumulates drift around a closed parameter cycle.
+    """
+    coords = np.stack([X, Y, Z], axis=-1).copy()
+    K_u, K_v, _ = coords.shape
+
+    if periodic_v and K_v > 1:
+        drift_v = coords[:, -1, :] - coords[:, 0, :]
+        weights_v = np.linspace(0.0, 1.0, K_v)[None, :, None]
+        coords -= weights_v * drift_v[:, None, :]
+
+    if periodic_u and K_u > 1:
+        drift_u = coords[-1, :, :] - coords[0, :, :]
+        weights_u = np.linspace(0.0, 1.0, K_u)[:, None, None]
+        coords -= weights_u * drift_u[None, :, :]
+
+    return coords[:, :, 0], coords[:, :, 1], coords[:, :, 2]
 
 
 def reconstruct_from_model(
@@ -345,18 +375,18 @@ def reconstruct_from_model(
     t_col = torch.full((N_pts, 1), t_val, device=device)
     tuv = torch.cat([t_col, uv_flat], dim=1)
 
-    # Evaluate model
+    # Evaluate model. Do not use `no_grad()` here because endpoint-conditioned
+    # models may compute analytic derivatives internally.
     model.eval()
-    with torch.no_grad():
-        E, F, G, L, M, N = model(tuv)
+    E, F, G, L, M, N = model(tuv)
 
     # Reshape to grid
-    E_np = E.reshape(K_grid, K_grid).cpu().numpy()
-    F_np = F.reshape(K_grid, K_grid).cpu().numpy()
-    G_np = G.reshape(K_grid, K_grid).cpu().numpy()
-    L_np = L.reshape(K_grid, K_grid).cpu().numpy()
-    M_np = M.reshape(K_grid, K_grid).cpu().numpy()
-    N_np = N.reshape(K_grid, K_grid).cpu().numpy()
+    E_np = E.reshape(K_grid, K_grid).detach().cpu().numpy()
+    F_np = F.reshape(K_grid, K_grid).detach().cpu().numpy()
+    G_np = G.reshape(K_grid, K_grid).detach().cpu().numpy()
+    L_np = L.reshape(K_grid, K_grid).detach().cpu().numpy()
+    M_np = M.reshape(K_grid, K_grid).detach().cpu().numpy()
+    N_np = N.reshape(K_grid, K_grid).detach().cpu().numpy()
 
     # Compute curvatures
     det_a = E_np * G_np - F_np**2
@@ -374,3 +404,222 @@ def reconstruct_from_model(
     }
 
     return X, Y, Z, metrics
+
+
+# =============================================================================
+# Spherical coordinate reconstruction
+# =============================================================================
+
+def reconstruct_surface_spherical(
+    E: np.ndarray,
+    F: np.ndarray,
+    G: np.ndarray,
+    L: np.ndarray,
+    M: np.ndarray,
+    N: np.ndarray,
+    d_theta: float,
+    d_phi: float,
+) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """
+    Reconstruct surface embedding from fundamental forms in spherical coordinates.
+
+    Uses Gauss-Weingarten frame integration in (θ, φ) coordinates.
+
+    Parameters
+    ----------
+    E, F, G : ndarray (K_theta, K_phi)
+        First fundamental form components.
+    L, M, N : ndarray (K_theta, K_phi)
+        Second fundamental form components.
+    d_theta, d_phi : float
+        Grid spacing in θ and φ.
+
+    Returns
+    -------
+    X, Y, Z : ndarray (K_theta, K_phi)
+        Surface coordinates in 3D.
+    """
+    K_theta, K_phi = E.shape
+
+    # Christoffel symbols
+    Gamma = compute_christoffel_symbols(E, F, G, d_theta, d_phi)
+
+    # Initialize frame
+    r = np.zeros((K_theta, K_phi, 3))
+    r_theta = np.zeros((K_theta, K_phi, 3))
+    r_phi = np.zeros((K_theta, K_phi, 3))
+
+    # Initial frame at (0, 0) - corresponds to near north pole
+    # For sphere-like surfaces, start with appropriate orientation
+    sqrt_E = np.sqrt(np.maximum(E[0, 0], 1e-10))
+    det = E[0, 0] * G[0, 0] - F[0, 0]**2
+    sqrt_det_over_E = np.sqrt(np.maximum(det, 1e-10)) / sqrt_E
+
+    # Initial tangent frame
+    r[0, 0] = np.array([0.0, 0.0, 1.0])  # Start near north pole
+    r_theta[0, 0] = np.array([sqrt_E, 0.0, 0.0])
+    r_phi[0, 0] = np.array([F[0, 0] / sqrt_E, sqrt_det_over_E, 0.0])
+
+    def compute_normal(r_t: np.ndarray, r_p: np.ndarray) -> np.ndarray:
+        cross = np.cross(r_t, r_p)
+        norm = np.linalg.norm(cross)
+        if norm < 1e-10:
+            return np.array([0.0, 0.0, 1.0])
+        return cross / norm
+
+    def gauss_rhs_theta(r_t, r_p, Gamma_pt, L_pt, M_pt):
+        n = compute_normal(r_t, r_p)
+        dr_t_dt = Gamma_pt['G111'] * r_t + Gamma_pt['G211'] * r_p + L_pt * n
+        dr_p_dt = Gamma_pt['G112'] * r_t + Gamma_pt['G212'] * r_p + M_pt * n
+        return dr_t_dt, dr_p_dt
+
+    def gauss_rhs_phi(r_t, r_p, Gamma_pt, M_pt, N_pt):
+        n = compute_normal(r_t, r_p)
+        dr_t_dp = Gamma_pt['G112'] * r_t + Gamma_pt['G212'] * r_p + M_pt * n
+        dr_p_dp = Gamma_pt['G122'] * r_t + Gamma_pt['G222'] * r_p + N_pt * n
+        return dr_t_dp, dr_p_dp
+
+    def get_gamma_at(i, j):
+        return {k: v[i, j] for k, v in Gamma.items()}
+
+    # Propagate along first row (φ direction)
+    for j in range(1, K_phi):
+        r_prev = r[0, j-1]
+        rt_prev = r_theta[0, j-1]
+        rp_prev = r_phi[0, j-1]
+        Gamma_prev = get_gamma_at(0, j-1)
+        M_prev, N_prev = M[0, j-1], N[0, j-1]
+
+        drt_dp_prev, drp_dp_prev = gauss_rhs_phi(rt_prev, rp_prev, Gamma_prev, M_prev, N_prev)
+
+        rt_pred = rt_prev + d_phi * drt_dp_prev
+        rp_pred = rp_prev + d_phi * drp_dp_prev
+
+        Gamma_curr = get_gamma_at(0, j)
+        M_curr, N_curr = M[0, j], N[0, j]
+        drt_dp_curr, drp_dp_curr = gauss_rhs_phi(rt_pred, rp_pred, Gamma_curr, M_curr, N_curr)
+
+        r_theta[0, j] = rt_prev + 0.5 * d_phi * (drt_dp_prev + drt_dp_curr)
+        r_phi[0, j] = rp_prev + 0.5 * d_phi * (drp_dp_prev + drp_dp_curr)
+        r[0, j] = r_prev + 0.5 * d_phi * (rp_prev + r_phi[0, j])
+
+    # Propagate along θ direction for each φ
+    for j in range(K_phi):
+        for i in range(1, K_theta):
+            r_prev = r[i-1, j]
+            rt_prev = r_theta[i-1, j]
+            rp_prev = r_phi[i-1, j]
+            Gamma_prev = get_gamma_at(i-1, j)
+            L_prev, M_prev = L[i-1, j], M[i-1, j]
+
+            drt_dt_prev, drp_dt_prev = gauss_rhs_theta(rt_prev, rp_prev, Gamma_prev, L_prev, M_prev)
+
+            rt_pred = rt_prev + d_theta * drt_dt_prev
+            rp_pred = rp_prev + d_theta * drp_dt_prev
+
+            Gamma_curr = get_gamma_at(i, j)
+            L_curr, M_curr = L[i, j], M[i, j]
+            drt_dt_curr, drp_dt_curr = gauss_rhs_theta(rt_pred, rp_pred, Gamma_curr, L_curr, M_curr)
+
+            r_theta[i, j] = rt_prev + 0.5 * d_theta * (drt_dt_prev + drt_dt_curr)
+            r_phi[i, j] = rp_prev + 0.5 * d_theta * (drp_dt_prev + drp_dt_curr)
+            r[i, j] = r_prev + 0.5 * d_theta * (rt_prev + r_theta[i, j])
+
+    X = r[:, :, 0]
+    Y = r[:, :, 1]
+    Z = r[:, :, 2]
+
+    return X, Y, Z
+
+
+def reconstruct_from_model_spherical(
+    model,
+    t_val: float,
+    K_grid: int = None,
+    K_theta: int = 30,
+    K_phi: int = 60,
+    theta_range: Tuple[float, float] = (0.1, 3.04),
+    phi_range: Tuple[float, float] = (0.0, 2 * np.pi),
+    device: str = 'cpu',
+    return_metrics: bool = False,
+) -> Tuple[np.ndarray, np.ndarray, np.ndarray, dict]:
+    """
+    Reconstruct surface from a trained spherical model at a specific time.
+
+    Parameters
+    ----------
+    model : FundamentalFormNet
+        Trained neural metric model with spherical topology.
+    t_val : float
+        Time value in [0, 1].
+    K_theta : int
+        Grid resolution in θ.
+    K_phi : int
+        Grid resolution in φ.
+    theta_range : tuple
+        (θ_min, θ_max) range.
+    device : str
+        Torch device.
+
+    Returns
+    -------
+    X, Y, Z : ndarray (K_theta, K_phi)
+        Reconstructed surface coordinates.
+    metrics : dict
+        Dictionary with fundamental forms and curvatures.
+    """
+    import torch
+    import math
+
+    if K_grid is not None:
+        K_theta = K_grid
+        K_phi = K_grid
+
+    theta_min, theta_max = theta_range
+    phi_min, phi_max = phi_range
+    d_theta = (theta_max - theta_min) / (K_theta - 1)
+    d_phi = (phi_max - phi_min) / (K_phi - 1) if K_phi > 1 else 0.0
+
+    # Create grid
+    theta_1d = torch.linspace(theta_min, theta_max, K_theta, device=device)
+    phi_1d = torch.linspace(phi_min, phi_max, K_phi, device=device)
+    Theta, Phi = torch.meshgrid(theta_1d, phi_1d, indexing='ij')
+    theta_phi_flat = torch.stack([Theta.reshape(-1), Phi.reshape(-1)], dim=1)
+
+    N_pts = theta_phi_flat.shape[0]
+    t_col = torch.full((N_pts, 1), t_val, device=device)
+    t_theta_phi = torch.cat([t_col, theta_phi_flat], dim=1)
+
+    # Evaluate model. Do not use `no_grad()` here because endpoint-conditioned
+    # models may compute analytic derivatives internally.
+    model.eval()
+    E, F, G, L, M, N_coef = model(t_theta_phi)
+
+    # Reshape to grid
+    E_np = E.reshape(K_theta, K_phi).detach().cpu().numpy()
+    F_np = F.reshape(K_theta, K_phi).detach().cpu().numpy()
+    G_np = G.reshape(K_theta, K_phi).detach().cpu().numpy()
+    L_np = L.reshape(K_theta, K_phi).detach().cpu().numpy()
+    M_np = M.reshape(K_theta, K_phi).detach().cpu().numpy()
+    N_np = N_coef.reshape(K_theta, K_phi).detach().cpu().numpy()
+
+    # Compute curvatures
+    det_a = E_np * G_np - F_np**2
+    K_gauss = (L_np * N_np - M_np**2) / (det_a + 1e-12)
+    H_mean = (E_np * N_np + G_np * L_np - 2 * F_np * M_np) / (2 * det_a + 1e-12)
+
+    # Reconstruct surface
+    X, Y, Z = reconstruct_surface_spherical(E_np, F_np, G_np, L_np, M_np, N_np, d_theta, d_phi)
+
+    metrics = {
+        'E': E_np, 'F': F_np, 'G': G_np,
+        'L': L_np, 'M': M_np, 'N': N_np,
+        'K': K_gauss, 'H': H_mean,
+        'det': det_a,
+        'Theta': Theta.cpu().numpy(),
+        'Phi': Phi.cpu().numpy(),
+    }
+
+    if return_metrics:
+        return X, Y, Z, metrics
+    return X, Y, Z

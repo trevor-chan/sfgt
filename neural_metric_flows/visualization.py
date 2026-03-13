@@ -22,7 +22,7 @@ import matplotlib.colors as mcolors
 import torch
 from typing import Optional, List, Tuple, Dict
 
-from .reconstruction import reconstruct_surface
+from .reconstruction import reconstruct_surface, enforce_periodic_closure
 
 
 # =============================================================================
@@ -68,16 +68,15 @@ def evaluate_model_at_time(
     tuv = torch.cat([t_col, uv_flat], dim=1)
 
     model.eval()
-    with torch.no_grad():
-        E, F, G, L, M, N_coef = model(tuv)
+    E, F, G, L, M, N_coef = model(tuv)
 
     # Reshape to grid
-    E = E.reshape(K_grid, K_grid).cpu().numpy()
-    F = F.reshape(K_grid, K_grid).cpu().numpy()
-    G = G.reshape(K_grid, K_grid).cpu().numpy()
-    L = L.reshape(K_grid, K_grid).cpu().numpy()
-    M = M.reshape(K_grid, K_grid).cpu().numpy()
-    N_coef = N_coef.reshape(K_grid, K_grid).cpu().numpy()
+    E = E.reshape(K_grid, K_grid).detach().cpu().numpy()
+    F = F.reshape(K_grid, K_grid).detach().cpu().numpy()
+    G = G.reshape(K_grid, K_grid).detach().cpu().numpy()
+    L = L.reshape(K_grid, K_grid).detach().cpu().numpy()
+    M = M.reshape(K_grid, K_grid).detach().cpu().numpy()
+    N_coef = N_coef.reshape(K_grid, K_grid).detach().cpu().numpy()
 
     # Curvatures
     det = E * G - F**2
@@ -99,27 +98,28 @@ def evaluate_model_at_time(
 
 def draw_mesh_2d(ax, X, Y, color='steelblue', linewidth=0.5, alpha=0.7):
     """Draw a 2D mesh from coordinate arrays."""
-    K = X.shape[0]
-    for j in range(K):
+    K_u, K_v = X.shape
+    for j in range(K_v):
         ax.plot(X[:, j], Y[:, j], color=color, linewidth=linewidth, alpha=alpha)
-    for i in range(K):
+    for i in range(K_u):
         ax.plot(X[i, :], Y[i, :], color=color, linewidth=linewidth, alpha=alpha)
 
 
 def draw_colored_mesh_2d(ax, X, Y, field, cmap='viridis', linewidth=0.5):
     """Draw 2D mesh with lines colored by a scalar field."""
-    K = X.shape[0]
     norm = mcolors.Normalize(vmin=np.nanmin(field), vmax=np.nanmax(field))
     sm = plt.cm.ScalarMappable(cmap=cmap, norm=norm)
 
-    for j in range(K):
+    K_u, K_v = X.shape
+
+    for j in range(K_v):
         points = np.column_stack([X[:, j], Y[:, j]]).reshape(-1, 1, 2)
         segments = np.concatenate([points[:-1], points[1:]], axis=1)
         vals = 0.5 * (field[:-1, j] + field[1:, j])
         lc = LineCollection(segments, colors=sm.to_rgba(vals), linewidth=linewidth)
         ax.add_collection(lc)
 
-    for i in range(K):
+    for i in range(K_u):
         points = np.column_stack([X[i, :], Y[i, :]]).reshape(-1, 1, 2)
         segments = np.concatenate([points[:-1], points[1:]], axis=1)
         vals = 0.5 * (field[i, :-1] + field[i, 1:])
@@ -135,29 +135,30 @@ def draw_colored_mesh_2d(ax, X, Y, field, cmap='viridis', linewidth=0.5):
 
 def draw_mesh_3d(ax, X, Y, Z, color='steelblue', linewidth=0.5, alpha=0.7):
     """Draw a 3D wireframe mesh."""
-    K = X.shape[0]
-    for j in range(K):
+    K_u, K_v = X.shape
+    for j in range(K_v):
         ax.plot(X[:, j], Y[:, j], Z[:, j], color=color, linewidth=linewidth, alpha=alpha)
-    for i in range(K):
+    for i in range(K_u):
         ax.plot(X[i, :], Y[i, :], Z[i, :], color=color, linewidth=linewidth, alpha=alpha)
 
 
 def draw_colored_mesh_3d(ax, X, Y, Z, field, cmap='coolwarm', linewidth=0.5):
     """Draw 3D mesh with lines colored by a scalar field."""
-    K = X.shape[0]
     norm = mcolors.Normalize(vmin=np.nanmin(field), vmax=np.nanmax(field))
     sm = plt.cm.ScalarMappable(cmap=cmap, norm=norm)
 
-    for j in range(K):
-        for i in range(K - 1):
+    K_u, K_v = X.shape
+
+    for j in range(K_v):
+        for i in range(K_u - 1):
             color = sm.to_rgba(0.5 * (field[i, j] + field[i+1, j]))
             ax.plot([X[i, j], X[i+1, j]],
                     [Y[i, j], Y[i+1, j]],
                     [Z[i, j], Z[i+1, j]],
                     color=color, linewidth=linewidth)
 
-    for i in range(K):
-        for j in range(K - 1):
+    for i in range(K_u):
+        for j in range(K_v - 1):
             color = sm.to_rgba(0.5 * (field[i, j] + field[i, j+1]))
             ax.plot([X[i, j], X[i, j+1]],
                     [Y[i, j], Y[i, j+1]],
@@ -208,6 +209,8 @@ def plot_training_curves(
     """
     Plot training loss and curvature curves.
 
+    Shows mean curvature on left y-axis (blue) and std on right y-axis (red).
+
     Parameters
     ----------
     history : dict
@@ -229,19 +232,49 @@ def plot_training_curves(
 
     # Gaussian curvature
     if 'K_mean' in history:
-        axes[1].plot(history['K_mean'], label='|K| mean')
-        axes[1].set_xlabel('Step')
-        axes[1].set_ylabel('|K|')
-        axes[1].set_title('Gaussian Curvature')
-        axes[1].legend()
+        ax1_left = axes[1]
+        ax1_left.plot(history['K_mean'], label='|K| mean', color='C0')
+        ax1_left.set_xlabel('Step')
+        ax1_left.set_ylabel('|K|', color='C0')
+        ax1_left.tick_params(axis='y', labelcolor='C0')
+        ax1_left.set_title('Gaussian Curvature')
+
+        # Secondary axis for K std
+        if 'K_std' in history and len(history['K_std']) > 0:
+            ax1_right = ax1_left.twinx()
+            ax1_right.plot(history['K_std'], label='|K| std', color='red', alpha=0.8, linestyle='--')
+            ax1_right.set_ylabel('Std(K)', color='red')
+            ax1_right.tick_params(axis='y', labelcolor='red')
+
+            # Combined legend
+            lines1, labels1 = ax1_left.get_legend_handles_labels()
+            lines2, labels2 = ax1_right.get_legend_handles_labels()
+            ax1_left.legend(lines1 + lines2, labels1 + labels2, loc='best')
+        else:
+            ax1_left.legend()
 
     # Mean curvature
     if 'H_mean' in history:
-        axes[2].plot(history['H_mean'], label='|H| mean')
-        axes[2].set_xlabel('Step')
-        axes[2].set_ylabel('|H|')
-        axes[2].set_title('Mean Curvature')
-        axes[2].legend()
+        ax2_left = axes[2]
+        ax2_left.plot(history['H_mean'], label='|H| mean', color='C1')
+        ax2_left.set_xlabel('Step')
+        ax2_left.set_ylabel('|H|', color='C1')
+        ax2_left.tick_params(axis='y', labelcolor='C1')
+        ax2_left.set_title('Mean Curvature')
+
+        # Secondary axis for H std
+        if 'H_std' in history and len(history['H_std']) > 0:
+            ax2_right = ax2_left.twinx()
+            ax2_right.plot(history['H_std'], label='|H| std', color='red', alpha=0.8, linestyle='--')
+            ax2_right.set_ylabel('Std(H)', color='red')
+            ax2_right.tick_params(axis='y', labelcolor='red')
+
+            # Combined legend
+            lines1, labels1 = ax2_left.get_legend_handles_labels()
+            lines2, labels2 = ax2_right.get_legend_handles_labels()
+            ax2_left.legend(lines1 + lines2, labels1 + labels2, loc='best')
+        else:
+            ax2_left.legend()
 
     plt.tight_layout()
 
@@ -730,40 +763,68 @@ def plot_curvature_summary(
 ):
     """
     Plot curvature statistics vs time.
+
+    Shows mean curvature on left y-axis (blue) and std on right y-axis (red).
     """
     times = np.linspace(0, 1, n_t)
     results = [evaluate_model_at_time(model, t, K_grid, margin, device) for t in times]
 
     K_mean = [np.mean(r['K']) for r in results]
+    K_std = [np.std(r['K']) for r in results]
     K_min = [np.min(r['K']) for r in results]
     K_max = [np.max(r['K']) for r in results]
     H_mean = [np.mean(r['H']) for r in results]
+    H_std = [np.std(r['H']) for r in results]
     H_min = [np.min(r['H']) for r in results]
     H_max = [np.max(r['H']) for r in results]
 
     fig, axes = plt.subplots(1, 2, figsize=(12, 4))
 
-    # Gaussian
-    axes[0].plot(times, K_mean, 'o-', label='K mean', color='C0')
-    axes[0].fill_between(times, K_min, K_max, alpha=0.2, color='C0')
-    axes[0].axhline(0, color='gray', linestyle='--', alpha=0.5)
+    # Gaussian curvature K
+    ax1_left = axes[0]
+    ax1_left.plot(times, K_mean, 'o-', label='K mean', color='C0')
+    ax1_left.fill_between(times, K_min, K_max, alpha=0.2, color='C0')
+    ax1_left.axhline(0, color='gray', linestyle='--', alpha=0.5)
     if target_K is not None:
-        axes[0].axhline(target_K, color='green', linestyle='--', alpha=0.5, label=f'Target K={target_K}')
-    axes[0].set_xlabel('t')
-    axes[0].set_ylabel('Gaussian Curvature K')
-    axes[0].set_title('K vs Time')
-    axes[0].legend()
+        ax1_left.axhline(target_K, color='green', linestyle='--', alpha=0.5, label=f'Target K={target_K}')
+    ax1_left.set_xlabel('t')
+    ax1_left.set_ylabel('Gaussian Curvature K', color='C0')
+    ax1_left.tick_params(axis='y', labelcolor='C0')
+    ax1_left.set_title('K vs Time')
 
-    # Mean
-    axes[1].plot(times, H_mean, 'o-', label='H mean', color='C1')
-    axes[1].fill_between(times, H_min, H_max, alpha=0.2, color='C1')
-    axes[1].axhline(0, color='gray', linestyle='--', alpha=0.5)
+    # Secondary axis for K std
+    ax1_right = ax1_left.twinx()
+    ax1_right.plot(times, K_std, 's--', label='K std', color='red', alpha=0.8)
+    ax1_right.set_ylabel('Std(K)', color='red')
+    ax1_right.tick_params(axis='y', labelcolor='red')
+
+    # Combined legend
+    lines1, labels1 = ax1_left.get_legend_handles_labels()
+    lines2, labels2 = ax1_right.get_legend_handles_labels()
+    ax1_left.legend(lines1 + lines2, labels1 + labels2, loc='best')
+
+    # Mean curvature H
+    ax2_left = axes[1]
+    ax2_left.plot(times, H_mean, 'o-', label='H mean', color='C1')
+    ax2_left.fill_between(times, H_min, H_max, alpha=0.2, color='C1')
+    ax2_left.axhline(0, color='gray', linestyle='--', alpha=0.5)
     if target_H is not None:
-        axes[1].axhline(target_H, color='green', linestyle='--', alpha=0.5, label=f'Target H={target_H}')
-    axes[1].set_xlabel('t')
-    axes[1].set_ylabel('Mean Curvature H')
-    axes[1].set_title('H vs Time')
-    axes[1].legend()
+        ax2_left.axhline(target_H, color='green', linestyle='--', alpha=0.5, label=f'Target H={target_H}')
+    ax2_left.set_xlabel('t')
+    ax2_left.set_ylabel('Mean Curvature H', color='C1')
+    ax2_left.tick_params(axis='y', labelcolor='C1')
+    ax2_left.set_title('H vs Time')
+
+    # Secondary axis for H std
+    ax2_right = ax2_left.twinx()
+    ax2_right.plot(times, H_std, 's--', label='H std', color='red', alpha=0.8)
+    ax2_right.set_ylabel('Std(H)', color='red')
+    ax2_right.tick_params(axis='y', labelcolor='red')
+
+    # Combined legend
+    lines1, labels1 = ax2_left.get_legend_handles_labels()
+    lines2, labels2 = ax2_right.get_legend_handles_labels()
+    ax2_left.legend(lines1 + lines2, labels1 + labels2, loc='best')
 
     plt.tight_layout()
 
@@ -818,3 +879,424 @@ def plot_curvature_surface_3d(
         print(f"Saved: {save_path}")
 
     return fig
+
+
+# =============================================================================
+# Spherical coordinate visualization
+# =============================================================================
+
+def evaluate_model_spherical(
+    model,
+    t_val: float,
+    K_grid: Optional[int] = None,
+    K_theta: int = 30,
+    K_phi: int = 60,
+    theta_range: Tuple[float, float] = (0.1, 3.04),
+    phi_range: Tuple[float, float] = (0.0, 2 * np.pi),
+    device: str = 'cpu',
+) -> Dict[str, np.ndarray]:
+    """
+    Evaluate neural metric model in spherical coordinates.
+
+    Parameters
+    ----------
+    model : FundamentalFormNet
+        Trained model with spherical topology.
+    t_val : float
+        Time in [0, 1].
+    K_theta : int
+        Grid resolution in θ.
+    K_phi : int
+        Grid resolution in φ.
+    theta_range : tuple
+        (θ_min, θ_max) range.
+    device : str
+        Torch device.
+
+    Returns
+    -------
+    result : dict
+        Contains E, F, G, L, M, N, K, H, Theta, Phi arrays.
+    """
+    import math
+
+    if K_grid is not None:
+        K_theta = K_grid
+        K_phi = K_grid
+
+    theta_min, theta_max = theta_range
+    phi_min, phi_max = phi_range
+
+    theta_1d = torch.linspace(theta_min, theta_max, K_theta, device=device)
+    phi_1d = torch.linspace(phi_min, phi_max, K_phi, device=device)
+    Theta, Phi = torch.meshgrid(theta_1d, phi_1d, indexing='ij')
+    theta_phi_flat = torch.stack([Theta.reshape(-1), Phi.reshape(-1)], dim=1)
+
+    N_pts = theta_phi_flat.shape[0]
+    t_col = torch.full((N_pts, 1), t_val, device=device)
+    t_theta_phi = torch.cat([t_col, theta_phi_flat], dim=1)
+
+    model.eval()
+    E, F, G, L, M, N_coef = model(t_theta_phi)
+
+    E = E.reshape(K_theta, K_phi).detach().cpu().numpy()
+    F = F.reshape(K_theta, K_phi).detach().cpu().numpy()
+    G = G.reshape(K_theta, K_phi).detach().cpu().numpy()
+    L = L.reshape(K_theta, K_phi).detach().cpu().numpy()
+    M = M.reshape(K_theta, K_phi).detach().cpu().numpy()
+    N_coef = N_coef.reshape(K_theta, K_phi).detach().cpu().numpy()
+
+    det = E * G - F**2
+    K_gauss = (L * N_coef - M**2) / (det + 1e-12)
+    H_mean = (E * N_coef + G * L - 2 * F * M) / (2 * det + 1e-12)
+
+    return {
+        'E': E, 'F': F, 'G': G,
+        'L': L, 'M': M, 'N': N_coef,
+        'K': K_gauss, 'H': H_mean, 'det': det,
+        'Theta': Theta.cpu().numpy(),
+        'Phi': Phi.cpu().numpy(),
+        't': t_val,
+    }
+
+
+def _evaluate_model_rectangular(
+    model,
+    t_val: float,
+    u_range: Tuple[float, float],
+    v_range: Tuple[float, float],
+    K_u: int,
+    K_v: int,
+    device: str,
+    labels: Tuple[str, str],
+) -> Dict[str, np.ndarray]:
+    u_min, u_max = u_range
+    v_min, v_max = v_range
+
+    u_1d = torch.linspace(u_min, u_max, K_u, device=device)
+    v_1d = torch.linspace(v_min, v_max, K_v, device=device)
+    U, V = torch.meshgrid(u_1d, v_1d, indexing='ij')
+    uv_flat = torch.stack([U.reshape(-1), V.reshape(-1)], dim=1)
+
+    N_pts = uv_flat.shape[0]
+    t_col = torch.full((N_pts, 1), t_val, device=device)
+    tuv = torch.cat([t_col, uv_flat], dim=1)
+
+    model.eval()
+    E, F, G, L, M, N_coef = model(tuv)
+
+    E = E.reshape(K_u, K_v).detach().cpu().numpy()
+    F = F.reshape(K_u, K_v).detach().cpu().numpy()
+    G = G.reshape(K_u, K_v).detach().cpu().numpy()
+    L = L.reshape(K_u, K_v).detach().cpu().numpy()
+    M = M.reshape(K_u, K_v).detach().cpu().numpy()
+    N_coef = N_coef.reshape(K_u, K_v).detach().cpu().numpy()
+
+    det = E * G - F**2
+    K_gauss = (L * N_coef - M**2) / (det + 1e-12)
+    H_mean = (E * N_coef + G * L - 2 * F * M) / (2 * det + 1e-12)
+
+    return {
+        'E': E, 'F': F, 'G': G,
+        'L': L, 'M': M, 'N': N_coef,
+        'K': K_gauss, 'H': H_mean, 'det': det,
+        labels[0]: U.cpu().numpy(),
+        labels[1]: V.cpu().numpy(),
+        't': t_val,
+    }
+
+
+def evaluate_model_cylindrical(
+    model,
+    t_val: float,
+    K_z: int = 40,
+    K_phi: int = 60,
+    z_range: Tuple[float, float] = (-1.0, 1.0),
+    phi_range: Tuple[float, float] = (0.0, 2 * np.pi),
+    device: str = 'cpu',
+) -> Dict[str, np.ndarray]:
+    """Evaluate a cylindrical-topology model on a (z, phi) grid."""
+    return _evaluate_model_rectangular(
+        model=model,
+        t_val=t_val,
+        u_range=z_range,
+        v_range=phi_range,
+        K_u=K_z,
+        K_v=K_phi,
+        device=device,
+        labels=('Zeta', 'Phi'),
+    )
+
+
+def evaluate_model_toroidal(
+    model,
+    t_val: float,
+    K_u: int = 48,
+    K_v: int = 48,
+    u_range: Tuple[float, float] = (0.0, 2 * np.pi),
+    v_range: Tuple[float, float] = (0.0, 2 * np.pi),
+    device: str = 'cpu',
+) -> Dict[str, np.ndarray]:
+    """Evaluate a toroidal-topology model on a periodic (u, v) grid."""
+    return _evaluate_model_rectangular(
+        model=model,
+        t_val=t_val,
+        u_range=u_range,
+        v_range=v_range,
+        K_u=K_u,
+        K_v=K_v,
+        device=device,
+        labels=('U', 'V'),
+    )
+
+
+def plot_surface_trajectory_spherical(
+    model,
+    times: List[float] = None,
+    K_grid: Optional[int] = None,
+    K_theta: int = 30,
+    K_phi: int = 60,
+    theta_range: Tuple[float, float] = (0.1, 3.04),
+    phi_range: Tuple[float, float] = (0.0, 2 * np.pi),
+    color_by_curvature: bool = True,
+    figsize: Tuple[float, float] = None,
+    save_path: Optional[str] = None,
+    device: str = 'cpu',
+    surface_fn: Optional[callable] = None,
+):
+    """
+    Plot 3D surface morphing trajectory for spherical topology.
+
+    Parameters
+    ----------
+    model : FundamentalFormNet
+        Trained model with spherical topology.
+    times : list of float
+        Timepoints to visualize.
+    K_theta, K_phi : int
+        Grid resolution.
+    theta_range : tuple
+        (θ_min, θ_max) range.
+    color_by_curvature : bool
+        Color mesh by Gaussian curvature.
+    surface_fn : callable, optional
+        Function (theta, phi, t) -> (x, y, z) for analytic surface.
+        If None, uses numerical reconstruction.
+    """
+    from .reconstruction import reconstruct_surface_spherical
+    import math
+
+    if times is None:
+        times = [0.0, 0.25, 0.5, 0.75, 1.0]
+
+    if K_grid is not None:
+        K_theta = K_grid
+        K_phi = K_grid
+
+    n_panels = len(times)
+    if figsize is None:
+        figsize = (4 * n_panels, 4)
+
+    theta_min, theta_max = theta_range
+    d_theta = (theta_max - theta_min) / (K_theta - 1)
+    phi_min, phi_max = phi_range
+    d_phi = (phi_max - phi_min) / (K_phi - 1) if K_phi > 1 else 0.0
+
+    surfaces = []
+    results = []
+
+    for t_val in times:
+        result = evaluate_model_spherical(
+            model,
+            t_val,
+            K_theta=K_theta,
+            K_phi=K_phi,
+            theta_range=theta_range,
+            phi_range=phi_range,
+            device=device,
+        )
+        results.append(result)
+
+        if surface_fn is not None and (t_val == 0.0 or t_val == 1.0):
+            # Use analytic formula for endpoints
+            X, Y, Z = surface_fn(result['Theta'], result['Phi'], t_val)
+        else:
+            # Numerical reconstruction
+            X, Y, Z = reconstruct_surface_spherical(
+                result['E'], result['F'], result['G'],
+                result['L'], result['M'], result['N'],
+                d_theta, d_phi
+            )
+        surfaces.append((X, Y, Z))
+
+    # Global axis limits
+    all_coords = []
+    for X, Y, Z in surfaces:
+        all_coords.extend([X.min(), X.max(), Y.min(), Y.max(), Z.min(), Z.max()])
+    coord_range = max(all_coords) - min(all_coords)
+
+    fig = plt.figure(figsize=figsize)
+
+    for idx, (t_val, (X, Y, Z), result) in enumerate(zip(times, surfaces, results)):
+        ax = fig.add_subplot(1, n_panels, idx + 1, projection='3d')
+
+        if color_by_curvature:
+            draw_colored_mesh_3d(ax, X, Y, Z, result['K'], cmap='coolwarm', linewidth=0.5)
+        else:
+            draw_mesh_3d(ax, X, Y, Z, color='steelblue', linewidth=0.5)
+
+        ax.set_title(f't = {t_val:.2f}', fontsize=11)
+
+        max_range = coord_range / 2
+        mid_x, mid_y, mid_z = X.mean(), Y.mean(), Z.mean()
+        ax.set_xlim(mid_x - max_range, mid_x + max_range)
+        ax.set_ylim(mid_y - max_range, mid_y + max_range)
+        ax.set_zlim(mid_z - max_range, mid_z + max_range)
+        ax.set_xlabel('x')
+        ax.set_ylabel('y')
+        ax.set_zlabel('z')
+
+    fig.suptitle('Surface Trajectory (Spherical)', fontsize=13, y=1.02)
+    plt.tight_layout()
+
+    if save_path:
+        fig.savefig(save_path, dpi=150, bbox_inches='tight')
+        print(f"Saved: {save_path}")
+
+    return fig
+
+
+def _plot_surface_trajectory_rectangular(
+    model,
+    evaluator,
+    times: List[float],
+    du: float,
+    dv: float,
+    figsize: Optional[Tuple[float, float]],
+    save_path: Optional[str],
+    color_by_curvature: bool,
+    title: str,
+    periodic_u: bool = False,
+    periodic_v: bool = False,
+):
+    n_panels = len(times)
+    if figsize is None:
+        figsize = (4 * n_panels, 4)
+
+    surfaces = []
+    results = []
+
+    for t_val in times:
+        result = evaluator(t_val)
+        X, Y, Z = reconstruct_surface(
+            result['E'], result['F'], result['G'],
+            result['L'], result['M'], result['N'],
+            du, dv,
+        )
+        X, Y, Z = enforce_periodic_closure(X, Y, Z, periodic_u=periodic_u, periodic_v=periodic_v)
+        surfaces.append((X, Y, Z))
+        results.append(result)
+
+    all_coords = []
+    for X, Y, Z in surfaces:
+        all_coords.extend([X.min(), X.max(), Y.min(), Y.max(), Z.min(), Z.max()])
+    coord_range = max(all_coords) - min(all_coords)
+
+    fig = plt.figure(figsize=figsize)
+
+    for idx, (t_val, (X, Y, Z), result) in enumerate(zip(times, surfaces, results)):
+        ax = fig.add_subplot(1, n_panels, idx + 1, projection='3d')
+        if color_by_curvature:
+            draw_colored_mesh_3d(ax, X, Y, Z, result['K'], cmap='coolwarm', linewidth=0.5)
+        else:
+            draw_mesh_3d(ax, X, Y, Z, color='steelblue', linewidth=0.5)
+
+        ax.set_title(f't = {t_val:.2f}', fontsize=11)
+        max_range = coord_range / 2
+        mid_x, mid_y, mid_z = X.mean(), Y.mean(), Z.mean()
+        ax.set_xlim(mid_x - max_range, mid_x + max_range)
+        ax.set_ylim(mid_y - max_range, mid_y + max_range)
+        ax.set_zlim(mid_z - max_range, mid_z + max_range)
+        ax.set_xlabel('x')
+        ax.set_ylabel('y')
+        ax.set_zlabel('z')
+
+    fig.suptitle(title, fontsize=13, y=1.02)
+    plt.tight_layout()
+
+    if save_path:
+        fig.savefig(save_path, dpi=150, bbox_inches='tight')
+        print(f"Saved: {save_path}")
+
+    return fig
+
+
+def plot_surface_trajectory_cylindrical(
+    model,
+    times: List[float] = None,
+    K_z: int = 40,
+    K_phi: int = 60,
+    z_range: Tuple[float, float] = (-1.0, 1.0),
+    phi_range: Tuple[float, float] = (0.0, 2 * np.pi),
+    color_by_curvature: bool = True,
+    figsize: Tuple[float, float] = None,
+    save_path: Optional[str] = None,
+    device: str = 'cpu',
+):
+    """Plot a 3D surface trajectory for cylindrical topology."""
+    if times is None:
+        times = [0.0, 0.25, 0.5, 0.75, 1.0]
+
+    du = (z_range[1] - z_range[0]) / (K_z - 1)
+    dv = (phi_range[1] - phi_range[0]) / (K_phi - 1)
+
+    return _plot_surface_trajectory_rectangular(
+        model=model,
+        evaluator=lambda t: evaluate_model_cylindrical(
+            model, t, K_z=K_z, K_phi=K_phi, z_range=z_range, phi_range=phi_range, device=device
+        ),
+        times=times,
+        du=du,
+        dv=dv,
+        figsize=figsize,
+        save_path=save_path,
+        color_by_curvature=color_by_curvature,
+        title='Surface Trajectory (Cylindrical)',
+        periodic_v=True,
+    )
+
+
+def plot_surface_trajectory_toroidal(
+    model,
+    times: List[float] = None,
+    K_u: int = 48,
+    K_v: int = 48,
+    u_range: Tuple[float, float] = (0.0, 2 * np.pi),
+    v_range: Tuple[float, float] = (0.0, 2 * np.pi),
+    color_by_curvature: bool = True,
+    figsize: Tuple[float, float] = None,
+    save_path: Optional[str] = None,
+    device: str = 'cpu',
+):
+    """Plot a 3D surface trajectory for toroidal topology."""
+    if times is None:
+        times = [0.0, 0.25, 0.5, 0.75, 1.0]
+
+    du = (u_range[1] - u_range[0]) / (K_u - 1)
+    dv = (v_range[1] - v_range[0]) / (K_v - 1)
+
+    return _plot_surface_trajectory_rectangular(
+        model=model,
+        evaluator=lambda t: evaluate_model_toroidal(
+            model, t, K_u=K_u, K_v=K_v, u_range=u_range, v_range=v_range, device=device
+        ),
+        times=times,
+        du=du,
+        dv=dv,
+        figsize=figsize,
+        save_path=save_path,
+        color_by_curvature=color_by_curvature,
+        title='Surface Trajectory (Toroidal)',
+        periodic_u=True,
+        periodic_v=True,
+    )

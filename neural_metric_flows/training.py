@@ -58,6 +58,102 @@ def sample_collocation(
     return tuv
 
 
+def sample_collocation_spherical(
+    n_points: int,
+    theta_range: Tuple[float, float] = (0.1, 3.04),  # Exclude poles
+    phi_range: Tuple[float, float] = (0.0, 2 * 3.14159265359),
+    device: torch.device = None,
+) -> torch.Tensor:
+    """
+    Sample (t, θ, φ) for spherical topology with proper surface measure.
+
+    Uses sin(θ) weighting for uniform sampling on the sphere surface.
+    Excludes small caps near the poles to avoid coordinate singularities.
+
+    Parameters
+    ----------
+    n_points : int
+        Number of collocation points.
+    theta_range : tuple
+        (θ_min, θ_max) range for polar angle. Default excludes ~6° caps at poles.
+    phi_range : tuple
+        (φ_min, φ_max) range for azimuthal angle. Default is [0, 2π].
+    device : torch.device
+        Target device.
+
+    Returns
+    -------
+    t_theta_phi : Tensor (n_points, 3)
+        Collocation points (t, θ, φ) with requires_grad=True.
+    """
+    import math
+
+    theta_min, theta_max = theta_range
+    phi_min, phi_max = phi_range
+
+    # Time uniform in [0, 1]
+    t = torch.rand(n_points, 1, device=device)
+
+    # For uniform sampling on sphere surface, we need:
+    # θ sampled from inverse CDF of sin(θ)
+    # P(θ) ∝ sin(θ), so CDF ∝ 1 - cos(θ)
+    # To sample in [θ_min, θ_max]:
+    # u ~ Uniform[0,1]
+    # θ = arccos(cos(θ_min) - u * (cos(θ_min) - cos(θ_max)))
+
+    cos_min = math.cos(theta_min)
+    cos_max = math.cos(theta_max)
+
+    u = torch.rand(n_points, device=device)
+    cos_theta = cos_min - u * (cos_min - cos_max)
+    theta = torch.acos(cos_theta).unsqueeze(-1)
+
+    # φ uniform in [φ_min, φ_max]
+    phi = phi_min + (phi_max - phi_min) * torch.rand(n_points, 1, device=device)
+
+    t_theta_phi = torch.cat([t, theta, phi], dim=1)
+    t_theta_phi.requires_grad_(True)
+    return t_theta_phi
+
+
+def sample_collocation_cylindrical(
+    n_points: int,
+    z_range: Tuple[float, float] = (-1.0, 1.0),
+    phi_range: Tuple[float, float] = (0.0, 2 * 3.14159265359),
+    device: torch.device = None,
+) -> torch.Tensor:
+    """Sample (t, z, phi) for cylindrical topology."""
+    z_min, z_max = z_range
+    phi_min, phi_max = phi_range
+
+    t = torch.rand(n_points, 1, device=device)
+    z = z_min + (z_max - z_min) * torch.rand(n_points, 1, device=device)
+    phi = phi_min + (phi_max - phi_min) * torch.rand(n_points, 1, device=device)
+
+    t_z_phi = torch.cat([t, z, phi], dim=1)
+    t_z_phi.requires_grad_(True)
+    return t_z_phi
+
+
+def sample_collocation_toroidal(
+    n_points: int,
+    u_range: Tuple[float, float] = (0.0, 2 * 3.14159265359),
+    v_range: Tuple[float, float] = (0.0, 2 * 3.14159265359),
+    device: torch.device = None,
+) -> torch.Tensor:
+    """Sample (t, u, v) for toroidal topology."""
+    u_min, u_max = u_range
+    v_min, v_max = v_range
+
+    t = torch.rand(n_points, 1, device=device)
+    u = u_min + (u_max - u_min) * torch.rand(n_points, 1, device=device)
+    v = v_min + (v_max - v_min) * torch.rand(n_points, 1, device=device)
+
+    tuv = torch.cat([t, u, v], dim=1)
+    tuv.requires_grad_(True)
+    return tuv
+
+
 # =============================================================================
 # Combined loss function
 # =============================================================================
@@ -228,10 +324,11 @@ class MetricFlowTrainer:
     n_collocation: int = 2048
     grad_clip: float = 1.0
     scheduler: Optional[torch.optim.lr_scheduler._LRScheduler] = None
+    collocation_sampler: Optional[Callable] = None
 
     # Training state
     history: Dict[str, List[float]] = field(default_factory=lambda: {
-        'loss_total': [], 'K_mean': [], 'H_mean': []
+        'loss_total': [], 'K_mean': [], 'K_std': [], 'H_mean': [], 'H_std': []
     })
 
     def __post_init__(self):
@@ -253,11 +350,17 @@ class MetricFlowTrainer:
         self.optimizer.zero_grad()
 
         # Sample collocation points
-        tuv = sample_collocation(
-            self.n_collocation,
-            domain_bounds=self.domain_bounds,
-            device=self.device,
-        )
+        if self.collocation_sampler is None:
+            tuv = sample_collocation(
+                self.n_collocation,
+                domain_bounds=self.domain_bounds,
+                device=self.device,
+            )
+        else:
+            tuv = self.collocation_sampler(
+                self.n_collocation,
+                device=self.device,
+            )
 
         # Forward pass
         E, F, G, L, M, N = self.model(tuv)
@@ -274,8 +377,10 @@ class MetricFlowTrainer:
                 **loss_components,
                 'K_max': torch.max(torch.abs(K)).item(),
                 'K_mean': torch.mean(torch.abs(K)).item(),
+                'K_std': torch.std(torch.abs(K)).item(),
                 'H_max': torch.max(torch.abs(H)).item(),
                 'H_mean': torch.mean(torch.abs(H)).item(),
+                'H_std': torch.std(torch.abs(H)).item(),
             }
 
         # Backward pass
@@ -323,7 +428,10 @@ class MetricFlowTrainer:
         print(f"Model: {n_params:,} parameters")
         print(f"Device: {self.device}")
         print(f"Training: {n_steps} steps, {self.n_collocation} collocation points")
-        print(f"Domain: [{self.domain_bounds[0]:.2f}, {self.domain_bounds[1]:.2f}]²")
+        if self.collocation_sampler is None:
+            print(f"Domain: [{self.domain_bounds[0]:.2f}, {self.domain_bounds[1]:.2f}]²")
+        else:
+            print("Domain: custom sampler")
         print()
 
         t_start = time.time()
@@ -334,13 +442,15 @@ class MetricFlowTrainer:
             # Record history
             self.history['loss_total'].append(metrics['total'])
             self.history['K_mean'].append(metrics['K_mean'])
+            self.history['K_std'].append(metrics['K_std'])
             self.history['H_mean'].append(metrics['H_mean'])
+            self.history['H_std'].append(metrics['H_std'])
 
             # Record component losses
             for key, value in metrics.items():
                 if key not in self.history:
                     self.history[key] = []
-                if key not in ['total', 'K_mean', 'H_mean', 'K_max', 'H_max']:
+                if key not in ['total', 'K_mean', 'K_std', 'H_mean', 'H_std', 'K_max', 'H_max']:
                     self.history[key].append(value)
 
             # Logging
@@ -391,8 +501,7 @@ class MetricFlowTrainer:
             t_col = torch.full((N_pts, 1), t_val.item(), device=self.device)
             tuv = torch.cat([t_col, uv_flat], dim=1)
 
-            with torch.no_grad():
-                E, F, G, L, M, N = self.model(tuv)
+            E, F, G, L, M, N = self.model(tuv)
 
             det_a = E * G - F * F
             K = (L * N - M * M) / (det_a + 1e-12)
@@ -400,15 +509,15 @@ class MetricFlowTrainer:
 
             results.append({
                 't': t_val.item(),
-                'E': E.reshape(K_grid, K_grid).cpu().numpy(),
-                'F': F.reshape(K_grid, K_grid).cpu().numpy(),
-                'G': G.reshape(K_grid, K_grid).cpu().numpy(),
-                'L': L.reshape(K_grid, K_grid).cpu().numpy(),
-                'M': M.reshape(K_grid, K_grid).cpu().numpy(),
-                'N': N.reshape(K_grid, K_grid).cpu().numpy(),
-                'K': K.reshape(K_grid, K_grid).cpu().numpy(),
-                'H': H.reshape(K_grid, K_grid).cpu().numpy(),
-                'det': det_a.reshape(K_grid, K_grid).cpu().numpy(),
+                'E': E.reshape(K_grid, K_grid).detach().cpu().numpy(),
+                'F': F.reshape(K_grid, K_grid).detach().cpu().numpy(),
+                'G': G.reshape(K_grid, K_grid).detach().cpu().numpy(),
+                'L': L.reshape(K_grid, K_grid).detach().cpu().numpy(),
+                'M': M.reshape(K_grid, K_grid).detach().cpu().numpy(),
+                'N': N.reshape(K_grid, K_grid).detach().cpu().numpy(),
+                'K': K.reshape(K_grid, K_grid).detach().cpu().numpy(),
+                'H': H.reshape(K_grid, K_grid).detach().cpu().numpy(),
+                'det': det_a.reshape(K_grid, K_grid).detach().cpu().numpy(),
             })
 
         self.model.train()

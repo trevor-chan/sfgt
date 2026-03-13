@@ -5,12 +5,156 @@ FundamentalFormNet: Maps (t, u, v) -> (E, F, G, L, M, N)
 
 Always outputs both first and second fundamental forms. For flat (2D) surfaces,
 use endpoint functions that return L=M=N=0 and add a flatness constraint.
+
+Supports different topologies via positional encodings:
+- 'open': Standard coordinates (u, v) ∈ ℝ²
+- 'cylindrical': One periodic axis (e.g., φ ∈ [0, 2π])
+- 'spherical': Spherical coordinates (θ, φ) with φ periodic
+- 'toroidal': Both axes periodic
 """
 
 import torch
 import torch.nn as nn
 import numpy as np
 from typing import Callable, Optional, Tuple
+
+
+# =============================================================================
+# Positional Encodings
+# =============================================================================
+
+class PeriodicEncoding(nn.Module):
+    """
+    Fourier feature encoding for periodic coordinates.
+
+    Maps x -> [cos(x), sin(x), cos(2x), sin(2x), ..., cos(kx), sin(kx)]
+
+    This naturally enforces periodicity since cos/sin are 2π-periodic.
+    """
+
+    def __init__(self, n_frequencies: int = 4, include_identity: bool = False):
+        """
+        Parameters
+        ----------
+        n_frequencies : int
+            Number of frequency components (k = 1, 2, ..., n_frequencies).
+        include_identity : bool
+            If True, also include the raw coordinate.
+        """
+        super().__init__()
+        self.n_frequencies = n_frequencies
+        self.include_identity = include_identity
+        # Output dimension: 2 * n_frequencies (cos + sin for each freq)
+        # Plus 1 if include_identity
+        self.out_dim = 2 * n_frequencies + (1 if include_identity else 0)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        """
+        Parameters
+        ----------
+        x : Tensor (...,)
+            Input coordinates.
+
+        Returns
+        -------
+        encoded : Tensor (..., out_dim)
+            Fourier features.
+        """
+        features = []
+        if self.include_identity:
+            features.append(x.unsqueeze(-1))
+
+        for k in range(1, self.n_frequencies + 1):
+            features.append(torch.cos(k * x).unsqueeze(-1))
+            features.append(torch.sin(k * x).unsqueeze(-1))
+
+        return torch.cat(features, dim=-1)
+
+
+class TopologyEncoding(nn.Module):
+    """
+    Positional encoding that respects manifold topology.
+
+    Topologies:
+    - 'open': No periodicity, use raw coordinates with optional Fourier features
+    - 'cylindrical': Second coordinate (v/φ) is periodic
+    - 'spherical': Second coordinate (φ) is periodic, first (θ) includes cos(θ)
+    - 'toroidal': Both coordinates are periodic
+    """
+
+    def __init__(
+        self,
+        topology: str = 'open',
+        n_frequencies: int = 4,
+        include_raw: bool = True,
+    ):
+        """
+        Parameters
+        ----------
+        topology : str
+            One of 'open', 'cylindrical', 'spherical', 'toroidal'.
+        n_frequencies : int
+            Number of Fourier frequencies for periodic axes.
+        include_raw : bool
+            Include raw coordinates for non-periodic axes.
+        """
+        super().__init__()
+        self.topology = topology
+        self.n_frequencies = n_frequencies
+        self.include_raw = include_raw
+
+        # Build encodings based on topology
+        if topology == 'open':
+            # Both coordinates raw, optionally with Fourier features
+            self.out_dim = 3  # t, u, v
+        elif topology == 'cylindrical':
+            # u raw, v periodic
+            self.periodic_v = PeriodicEncoding(n_frequencies, include_identity=False)
+            self.out_dim = 2 + self.periodic_v.out_dim  # t, u, periodic(v)
+        elif topology == 'spherical':
+            # θ raw + cos(θ) for pole behavior, φ periodic
+            self.periodic_phi = PeriodicEncoding(n_frequencies, include_identity=False)
+            self.out_dim = 3 + self.periodic_phi.out_dim  # t, θ, cos(θ), periodic(φ)
+        elif topology == 'toroidal':
+            # Both periodic
+            self.periodic_u = PeriodicEncoding(n_frequencies, include_identity=False)
+            self.periodic_v = PeriodicEncoding(n_frequencies, include_identity=False)
+            self.out_dim = 1 + self.periodic_u.out_dim + self.periodic_v.out_dim
+        else:
+            raise ValueError(f"Unknown topology: {topology}")
+
+    def forward(self, tuv: torch.Tensor) -> torch.Tensor:
+        """
+        Parameters
+        ----------
+        tuv : Tensor (N, 3)
+            Coordinates (t, u, v) or (t, θ, φ).
+
+        Returns
+        -------
+        encoded : Tensor (N, out_dim)
+            Topology-aware positional encoding.
+        """
+        t = tuv[:, 0:1]
+        u = tuv[:, 1]
+        v = tuv[:, 2]
+
+        if self.topology == 'open':
+            return tuv
+        elif self.topology == 'cylindrical':
+            v_enc = self.periodic_v(v)
+            return torch.cat([t, u.unsqueeze(-1), v_enc], dim=-1)
+        elif self.topology == 'spherical':
+            # θ is u, φ is v
+            theta = u
+            phi = v
+            phi_enc = self.periodic_phi(phi)
+            # Include cos(θ) to help with pole behavior
+            return torch.cat([t, theta.unsqueeze(-1), torch.cos(theta).unsqueeze(-1), phi_enc], dim=-1)
+        elif self.topology == 'toroidal':
+            u_enc = self.periodic_u(u)
+            v_enc = self.periodic_v(v)
+            return torch.cat([t, u_enc, v_enc], dim=-1)
 
 
 class SirenLayer(nn.Module):
@@ -73,6 +217,12 @@ class FundamentalFormNet(nn.Module):
         a(t, u, v) = (1-t)*a_0(u,v) + t*a_1(u,v) + t*(1-t)*NN(t,u,v)
 
     The t*(1-t) factor ensures the correction vanishes at endpoints.
+
+    Supports different topologies via positional encoding:
+    - 'open': Standard (u, v) coordinates
+    - 'cylindrical': v is periodic (useful for surfaces of revolution)
+    - 'spherical': (θ, φ) where φ is periodic
+    - 'toroidal': Both coordinates periodic
     """
 
     def __init__(
@@ -83,6 +233,8 @@ class FundamentalFormNet(nn.Module):
         omega_0: float = 30.0,
         endpoint_a_0: Optional[Callable] = None,
         endpoint_a_1: Optional[Callable] = None,
+        topology: str = 'open',
+        n_frequencies: int = 4,
     ):
         """
         Parameters
@@ -99,12 +251,22 @@ class FundamentalFormNet(nn.Module):
             (uv) -> (E, F, G, L, M, N) at t=0.
         endpoint_a_1 : callable, optional
             (uv) -> (E, F, G, L, M, N) at t=1.
+        topology : str
+            Coordinate topology: 'open', 'cylindrical', 'spherical', 'toroidal'.
+        n_frequencies : int
+            Number of Fourier frequencies for periodic encodings.
         """
         super().__init__()
         self.endpoint_a_0 = endpoint_a_0
         self.endpoint_a_1 = endpoint_a_1
+        self.topology = topology
 
-        in_dim = 3  # (t, u, v)
+        # Positional encoding
+        self.pos_encoding = TopologyEncoding(
+            topology=topology,
+            n_frequencies=n_frequencies,
+        )
+        in_dim = self.pos_encoding.out_dim
         n_out = 6   # (E, F, G, L, M, N)
         layers = []
 
@@ -138,7 +300,7 @@ class FundamentalFormNet(nn.Module):
         Parameters
         ----------
         tuv : Tensor (N, 3)
-            Columns are (t, u, v).
+            Columns are (t, u, v) or (t, θ, φ) for spherical topology.
 
         Returns
         -------
@@ -148,7 +310,9 @@ class FundamentalFormNet(nn.Module):
         t = tuv[:, 0:1]   # (N, 1)
         uv = tuv[:, 1:3]  # (N, 2)
 
-        raw = self.net(tuv)  # (N, 6)
+        # Apply topology-aware positional encoding
+        encoded = self.pos_encoding(tuv)
+        raw = self.net(encoded)  # (N, 6)
 
         if self.endpoint_a_0 is not None and self.endpoint_a_1 is not None:
             # Hard BC mode: baseline is convex combination of endpoints
@@ -263,5 +427,48 @@ def hemisphere_metric(uv: torch.Tensor) -> Tuple[torch.Tensor, ...]:
     L = E.clone()
     M = F.clone()
     N_coef = G.clone()
+
+    return (E, F, G, L, M, N_coef)
+
+
+# =============================================================================
+# Spherical coordinate metrics
+# =============================================================================
+
+def sphere_metric_spherical(theta_phi: torch.Tensor) -> Tuple[torch.Tensor, ...]:
+    """
+    Unit sphere metric in spherical coordinates (θ, φ).
+
+    Parameterization: r(θ,φ) = (sinθ cosφ, sinθ sinφ, cosθ)
+    where θ ∈ [0, π] (polar), φ ∈ [0, 2π] (azimuthal).
+
+    First fundamental form:
+        E = 1, F = 0, G = sin²(θ)
+
+    Second fundamental form (shape operator = -I for unit sphere):
+        L = 1, M = 0, N = sin²(θ)
+
+    This gives K = 1, H = 1 everywhere.
+
+    Parameters
+    ----------
+    theta_phi : Tensor (N, 2)
+        Columns are (θ, φ).
+
+    Returns
+    -------
+    (E, F, G, L, M, N) : tuple of Tensor (N,)
+    """
+    theta = theta_phi[:, 0]
+
+    E = torch.ones_like(theta)
+    F = torch.zeros_like(theta)
+    G = torch.sin(theta) ** 2
+
+    # Second fundamental form
+    # For unit sphere with outward normal, L = 1, N = sin²θ
+    L = torch.ones_like(theta)
+    M = torch.zeros_like(theta)
+    N_coef = torch.sin(theta) ** 2
 
     return (E, F, G, L, M, N_coef)

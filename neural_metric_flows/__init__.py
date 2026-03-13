@@ -5,16 +5,22 @@ Neural Metric Flows — Learning surface trajectories via differentiable fundame
 from .model import (
     FundamentalFormNet,
     SirenLayer,
+    PeriodicEncoding,
+    TopologyEncoding,
     enforce_metric_positivity,
     identity_metric,
     elliptic_disc_metric,
     hemisphere_metric,
+    sphere_metric_spherical,
 )
 
 from .training import (
     CombinedLoss,
     MetricFlowTrainer,
     sample_collocation,
+    sample_collocation_spherical,
+    sample_collocation_cylindrical,
+    sample_collocation_toroidal,
 )
 
 from .reconstruction import (
@@ -22,6 +28,9 @@ from .reconstruction import (
     reconstruct_flat_surface,
     reconstruct_from_model,
     compute_christoffel_symbols,
+    reconstruct_surface_spherical,
+    reconstruct_from_model_spherical,
+    enforce_periodic_closure,
 )
 
 from .geometry import (
@@ -32,6 +41,7 @@ from .geometry import (
     gaussian_curvature,
     mean_curvature,
     green_strain_invariants,
+    compute_fundamental_forms_from_embedding,
 )
 
 from .losses import (
@@ -48,9 +58,15 @@ from .losses import (
 
 from .visualization import (
     evaluate_model_at_time,
+    evaluate_model_spherical,
+    evaluate_model_cylindrical,
+    evaluate_model_toroidal,
     plot_training_curves,
     plot_surface_trajectory_2d,
     plot_surface_trajectory_3d,
+    plot_surface_trajectory_spherical,
+    plot_surface_trajectory_cylindrical,
+    plot_surface_trajectory_toroidal,
     plot_endpoint_comparison_2d,
     plot_endpoint_comparison_3d,
     plot_metric_evolution,
@@ -66,19 +82,28 @@ __all__ = [
     # Model
     'FundamentalFormNet',
     'SirenLayer',
+    'PeriodicEncoding',
+    'TopologyEncoding',
     'enforce_metric_positivity',
     'identity_metric',
     'elliptic_disc_metric',
     'hemisphere_metric',
+    'sphere_metric_spherical',
     # Training
     'CombinedLoss',
     'MetricFlowTrainer',
     'sample_collocation',
+    'sample_collocation_spherical',
+    'sample_collocation_cylindrical',
+    'sample_collocation_toroidal',
     # Reconstruction
     'reconstruct_surface',
     'reconstruct_flat_surface',
     'reconstruct_from_model',
     'compute_christoffel_symbols',
+    'reconstruct_surface_spherical',
+    'reconstruct_from_model_spherical',
+    'enforce_periodic_closure',
     # Geometry
     'christoffel_symbols',
     'gaussian_curvature_brioschi',
@@ -87,6 +112,7 @@ __all__ = [
     'gaussian_curvature',
     'mean_curvature',
     'green_strain_invariants',
+    'compute_fundamental_forms_from_embedding',
     # Losses
     'flatness_loss',
     'gauss_equation_loss',
@@ -99,9 +125,15 @@ __all__ = [
     'conformality_loss',
     # Visualization
     'evaluate_model_at_time',
+    'evaluate_model_spherical',
+    'evaluate_model_cylindrical',
+    'evaluate_model_toroidal',
     'plot_training_curves',
     'plot_surface_trajectory_2d',
     'plot_surface_trajectory_3d',
+    'plot_surface_trajectory_spherical',
+    'plot_surface_trajectory_cylindrical',
+    'plot_surface_trajectory_toroidal',
     'plot_endpoint_comparison_2d',
     'plot_endpoint_comparison_3d',
     'plot_metric_evolution',
